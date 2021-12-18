@@ -18,6 +18,14 @@ error_cost = {
     ">": 25137,
 }
 
+class IncompleteLine(Exception):
+    line_number: int
+
+    def __init__(self, line_number, *args: object) -> None:
+        super().__init__(*args)
+        self.line_number = line_number
+
+
 class CorruptLine(Exception):
     err_bracket: str
     err_pos: int
@@ -31,34 +39,69 @@ class CorruptLine(Exception):
 
 class Chunk:
 
-    def __init__(self, line_number,seq,start,stop=None) -> None:
+    def __init__(self, line_number,seq,start, stop=None, parent:"Chunk"=None) -> None:
+        self.parent = parent
+        self.child_chunks = []
         self.line_number = line_number
         self.seq = seq
         self.start = start
-        self.open_char = seq[start]
-        self.close_char = None
+        self.open_char = seq[start][0]
+        self.close_char = ""
         self.is_corrupt = False
+        self.is_incomplete = False
         self.stop = self._find_end(stop)
 
     def _find_end(self,stop:int=None):
-
+        expected_closer = open2closed_brackets[self.open_char]
         if stop is not None:
-            if self.seq[stop] == open2closed_brackets[self.open_char]:
+            if self.seq[stop][0] == expected_closer:
                 return stop
-        counts = {}
         try:
-            for i,c in enumerate(self.seq[self.start+1:],self.start+1):
+            i = self.start
+            while i<len(self.seq):
+                c,ref = self.seq[i]
                 k = closed2open_brackets.get(c, c)
-                ref = counts[k] = counts.setdefault(k, 0) + bracket_inc_vals[c]
-                if ref < 0:
+                if c == k and i!=self.start:
+                    child = Chunk(self.line_number,self.seq,i, None,self)
+                    self.child_chunks.append(child)
+                    if child.is_corrupt:
+                        self.is_corrupt = True
+                        return None
+                    if child.stop is None:
+                        child.is_corrupt = True
+                        self.is_corrupt = True
+                        return None
+                    i = child.stop
+                elif ref < 0:
                     err = CorruptLine(self.seq[self.start:i + 1], c, i)
                     raise err
                 elif ref == 0:
-                    ret.append(find_chunk_bounds(self.seq, i + 1, stop))
-                    ret.append(ret[-1][-1] + 1)
+                    if c==expected_closer:
+                        return i
                     break
+                i += 1
+            else:
+                self.is_incomplete = True
+                return None
         except CorruptLine as cl:
             self.is_corrupt = True
+            return None
+        return len(self.seq)
+
+    def flat_map_tree(self):
+        yield self
+        for child in self.child_chunks:
+            yield from child.flat_map_tree()
+
+    def __str__(self) -> str:
+        seq = "".join(self.seq[self.start:self.stop])
+        return f"[{self.line_number}; ({self.start}, {self.stop}) ..{seq}..; {self.is_corrupt}; {self.is_incomplete}]"
+
+    def __repr__(self) -> str:
+        child_reprs = " | ".join(repr(child) for child in self.child_chunks)
+        return f"Chunk - {str(self)} {{ {child_reprs} }}"
+
+
 def find_chunk_bounds(seq,start:int,stop:int)-> List[Tuple[int]]:
     ret = [start]
     counts = {}
@@ -106,11 +149,39 @@ def prep_data(raw):
     return ret
 
 def solve_part1(data:List[str]):
+    def do_line_chunking(pos):
+        chunk = Chunk(i, line, pos)
+        if not (chunk.is_corrupt or chunk.is_incomplete):
+            if chunk.stop is not None and chunk.stop < len(line):
+                do_line_chunking(chunk.stop+1)
+        return chunk
     line_results = []
     corrupted_lines = []
+    incomplete_lines = []
+    chunks_list = []
     for i,line in enumerate(data):
-        split_points = bound_check_re.split(line)
-        dbg_break = 0
+
+        counts = {}
+        count_seq = []
+        for k,c in enumerate(line):
+            k = closed2open_brackets.get(c, c)
+            ref = counts[k] = counts.setdefault(k, 0) + bracket_inc_vals[c]
+            count_seq.append(ref)
+        line = list(zip(line,count_seq))
+        fail_point = None
+        root = do_line_chunking(0)
+        for j,chunk in enumerate(root.flat_map_tree()):
+            if chunk.is_corrupt:
+                corrupted_lines.append(chunk)
+                fail_point = j
+
+            elif chunk.is_incomplete:
+                fail_point = j
+                incomplete_lines.append(chunk)
+            else:
+                chunks_list.append(chunk)
+
+        dbg_break = fail_point
         # ref = []
         # try:
         #     ref.append(find_chunk_bounds(line,0,len(line)))
